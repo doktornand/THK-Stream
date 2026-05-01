@@ -1,429 +1,22 @@
 """
 THK — Threat Intelligence Hub
 Interface Streamlit pour l'analyse multi-sources d'IPs et de domaines
+Version corrigée et ré-ordonnée
 """
 
 import streamlit as st
 import pandas as pd
 import json
+import os
 from datetime import datetime
 from dataclasses import asdict
 
 from analyzer import run_analysis, AnalysisResult
 
-#Streamlit Secrets
-def load_api_keys() -> dict:
-    keys = {}
-    mapping = {
-        "virustotal":     "VIRUSTOTAL_API_KEY",
-        "abuseipdb":      "ABUSEIPDB_API_KEY",
-        "shodan":         "SHODAN_API_KEY",
-        "greynoise":      "GREYNOISE_API_KEY",
-        "alienvault":     "ALIENVAULT_API_KEY",
-        "censys":         "CENSYS_API_KEY",
-        "securitytrails": "SECURITYTRAILS_KEY",
-        "leakix":         "LEAKIX_API_KEY",
-        "hetrixtools":    "HETRIXTOOLS_API_KEY",
-    }
-    for service, secret_name in mapping.items():
-        try:
-            keys[service] = st.secrets[secret_name]
-        except KeyError:
-            keys[service] = ""
-    return keys
 
-tab_analyze, tab_history, tab_export = st.tabs(["🔍 Analyse", "📜 Historique", "📤 Export"])
-
-
-# ── Session state ─────────────────────────────────────────────────────────────
-
-if "results" not in st.session_state:
-    st.session_state.results = []
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-def _render_result_card(result: AnalysisResult):
-    level = result.risk_level
-    score = result.risk_score
-    color = RISK_COLORS.get(level, "#64748b")
-    type_class = "type-ip" if result.target_type == "ip" else "type-domain"
-    type_label = "IPv4" if result.target_type == "ip" else "Domaine"
-
-    with st.container():
-        st.markdown(f"""
-        <div class="target-card">
-            <div class="target-header">
-                <div style="display:flex;align-items:center;gap:0.75rem">
-                    <div class="target-name">{result.target}</div>
-                    <span class="target-type-badge {type_class}">{type_label}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:1rem">
-                    <div class="score-circle score-{level}">
-                        <div style="font-size:1.3rem">{score}</div>
-                        <div style="font-size:0.55rem;opacity:0.7">/100</div>
-                    </div>
-                    <span class="risk-badge risk-{level}">{level}</span>
-                </div>
-            </div>
-            <div style="color:#64748b;font-size:0.85rem;margin-bottom:0.5rem">{result.summary}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Service detail columns
-        svc_cols = st.columns(3)
-        col_idx = 0
-
-        for svc_key, (icon, svc_name) in SERVICE_ICONS.items():
-            svc = result.services.get(svc_key, {})
-            status = svc.get("status", "unknown")
-
-            if status == "skipped":
-                continue
-
-            with svc_cols[col_idx % 3]:
-                _render_service_card(svc_key, icon, svc_name, svc, status, result.target_type)
-
-            col_idx += 1
-
-        # Factors
-        if result.factors:
-            with st.expander("🔎 Facteurs de risque détaillés"):
-                for f in result.factors:
-                    st.markdown(f"- {f}")
-
-        st.markdown("---")
-
-
-
-
-def _render_service_card(svc_key, icon, svc_name, svc, status, target_type):
-    status_html = {
-        "success": "<span style='color:#22c55e;font-size:0.7rem'>● OK</span>",
-        "error":   "<span style='color:#ef4444;font-size:0.7rem'>● Erreur</span>",
-        "timeout": "<span style='color:#f97316;font-size:0.7rem'>● Timeout</span>",
-        "no_key":  "<span style='color:#64748b;font-size:0.7rem'>● Pas de clé</span>",
-    }.get(status, "<span style='color:#64748b;font-size:0.7rem'>● —</span>")
-
-    rows_html = ""
-
-    if status == "success":
-        if svc_key == "virustotal":
-            mal   = svc.get("malicious", 0)
-            susp  = svc.get("suspicious", 0)
-            harm  = svc.get("harmless", 0)
-            und   = svc.get("undetected", 0)
-            total = svc.get("total", 1) or 1
-            pct = lambda n: round(n / total * 100)
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Malveillant</span>
-                <span class="service-val" style="color:#ef4444">{mal}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Suspect</span>
-                <span class="service-val" style="color:#f97316">{susp}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Total moteurs</span>
-                <span class="service-val">{total}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Réputation</span>
-                <span class="service-val">{svc.get("reputation", "N/A")}</span>
-            </div>
-            <div class="vt-bar-container">
-                <div class="vt-seg-mal"  style="width:{pct(mal)}%"></div>
-                <div class="vt-seg-susp" style="width:{pct(susp)}%"></div>
-                <div class="vt-seg-harm" style="width:{pct(harm)}%"></div>
-                <div class="vt-seg-und"  style="width:{pct(und)}%"></div>
-            </div>
-            """
-
-        elif svc_key == "abuseipdb":
-            conf    = svc.get("abuse_confidence", 0)
-            reports = svc.get("total_reports", 0)
-            col = "#ef4444" if conf > 50 else "#f97316" if conf > 20 else "#22c55e"
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Confiance abus</span>
-                <span class="service-val" style="color:{col}">{conf}%</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Signalements</span>
-                <span class="service-val">{reports}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Pays</span>
-                <span class="service-val">{svc.get("country","N/A")}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">ISP</span>
-                <span class="service-val">{str(svc.get("isp","N/A"))[:28]}</span>
-            </div>
-            """
-
-        elif svc_key == "greynoise":
-            noise = svc.get("noise", False)
-            riot  = svc.get("riot", False)
-            clf   = svc.get("classification", "N/A")
-            clf_col = "#ef4444" if clf == "malicious" else "#22c55e" if clf == "benign" else "#64748b"
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Classification</span>
-                <span class="service-val" style="color:{clf_col}">{clf}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Noise</span>
-                <span class="service-val">{"Oui" if noise else "Non"}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">RIOT</span>
-                <span class="service-val">{"Oui" if riot else "Non"}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Nom</span>
-                <span class="service-val">{str(svc.get("name","N/A"))[:24]}</span>
-            </div>
-            """
-
-        elif svc_key == "shodan":
-            ports = svc.get("ports", [])
-            vulns = svc.get("vulns", [])
-            tags  = svc.get("tags", [])
-            subs  = svc.get("subdomains", [])
-            if target_type == "ip":
-                ports_str = ", ".join(str(p) for p in ports[:6]) or "Aucun"
-                vulns_str = ", ".join(vulns[:3]) or "Aucun"
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Ports ouverts</span>
-                    <span class="service-val">{ports_str}</span>
-                </div>
-                <div class="service-row">
-                    <span class="service-key">CVE détectés</span>
-                    <span class="service-val" style="color:{'#ef4444' if vulns else '#22c55e'}">{len(vulns)}</span>
-                </div>
-                <div class="service-row">
-                    <span class="service-key">OS</span>
-                    <span class="service-val">{svc.get("os","N/A") or "N/A"}</span>
-                </div>
-                """
-                if vulns:
-                    rows_html += f"<div style='margin-top:0.3rem'>" + "".join(f'<span class="tag-pill tag-orange">{v}</span>' for v in vulns[:4]) + "</div>"
-            else:
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Sous-domaines</span>
-                    <span class="service-val">{len(subs)}</span>
-                </div>
-                """
-
-        elif svc_key == "alienvault":
-            pulses = svc.get("pulse_count", 0)
-            tags   = svc.get("tags", [])
-            col = "#ef4444" if pulses > 20 else "#f97316" if pulses > 5 else "#22c55e"
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Pulses OTX</span>
-                <span class="service-val" style="color:{col}">{pulses}</span>
-            </div>
-            """
-            if tags:
-                rows_html += "<div style='margin-top:0.4rem'>" + "".join(f'<span class="tag-pill">{t[:20]}</span>' for t in tags[:5]) + "</div>"
-
-        elif svc_key == "censys":
-            services = svc.get("services", [])
-            svcs_str = ", ".join(f"{s.get('port')}/{s.get('name','?')}" for s in services[:4]) or "N/A"
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Services exposés</span>
-                <span class="service-val">{len(services)}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Détail</span>
-                <span class="service-val">{svcs_str}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">OS</span>
-                <span class="service-val">{svc.get("os","N/A")}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Pays</span>
-                <span class="service-val">{svc.get("country","N/A")}</span>
-            </div>
-            """
-
-        elif svc_key == "securitytrails":
-            if target_type == "domain":
-                a_recs = ", ".join(svc.get("a_records", [])[:3]) or "N/A"
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Sous-domaines</span>
-                    <span class="service-val">{svc.get("subdomains",0)}</span>
-                </div>
-                <div class="service-row">
-                    <span class="service-key">Enregistrements A</span>
-                    <span class="service-val">{a_recs}</span>
-                </div>
-                """
-            else:
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Domaines hébergés</span>
-                    <span class="service-val">{svc.get("domains_hosted",0)}</span>
-                </div>
-                """
-
-        elif svc_key == "leakix":
-            leaks = svc.get("leaks", 0)
-            leak_col = "#ef4444" if leaks > 0 else "#22c55e"
-            rows_html += f"""
-            <div class="service-row">
-                <span class="service-key">Services trouvés</span>
-                <span class="service-val">{svc.get("services_found",0)}</span>
-            </div>
-            <div class="service-row">
-                <span class="service-key">Fuites détectées</span>
-                <span class="service-val" style="color:{leak_col}">{leaks}</span>
-            </div>
-            """
-
-        elif svc_key == "hetrixtools":
-            if target_type == "ip":
-                bl = svc.get("blacklisted_count", 0)
-                total = svc.get("total_checked", 0)
-                bl_col = "#ef4444" if bl > 5 else "#f97316" if bl > 0 else "#22c55e"
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Blacklisté sur</span>
-                    <span class="service-val" style="color:{bl_col}">{bl} / {total} RBLs</span>
-                </div>
-                """
-                bls = svc.get("blacklists", [])
-                if bls:
-                    rows_html += "<div style='margin-top:0.3rem'>" + "".join(f'<span class="tag-pill tag-red">{b[:20]}</span>' for b in bls[:4]) + "</div>"
-            else:
-                spf   = svc.get("spf", "N/A")
-                dmarc = svc.get("dmarc", "N/A")
-                bl_count = svc.get("blacklist_count", 0)
-                rows_html += f"""
-                <div class="service-row">
-                    <span class="service-key">Blacklists</span>
-                    <span class="service-val">{bl_count}</span>
-                </div>
-                <div class="service-row">
-                    <span class="service-key">SPF</span>
-                    <span class="service-val">{str(spf)[:30]}</span>
-                </div>
-                <div class="service-row">
-                    <span class="service-key">DMARC</span>
-                    <span class="service-val">{str(dmarc)[:30]}</span>
-                </div>
-                """
-    else:
-        reason = svc.get("reason") or svc.get("code") or ""
-        rows_html = f"<div style='color:#64748b;font-size:0.82rem;padding:0.5rem 0'>{reason}</div>"
-
-    st.markdown(f"""
-    <div class="service-card">
-        <div class="service-title">{icon} {svc_name} {status_html}</div>
-        {rows_html}
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ── TAB 2 — History ───────────────────────────────────────────────────────────
-
-with tab_history:
-    if not st.session_state.history:
-        st.info("Aucune analyse dans l'historique. Lancez une analyse dans l'onglet **Analyse**.")
-    else:
-        rows = []
-        for r in st.session_state.history:
-            rows.append({
-                "Cible": r.target,
-                "Type": r.target_type.upper(),
-                "Score": r.risk_score,
-                "Niveau": r.risk_level,
-                "Résumé": r.summary,
-                "Date": r.timestamp[:19].replace("T", " "),
-            })
-        df = pd.DataFrame(rows)
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            column_config={
-                "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
-                "Niveau": st.column_config.TextColumn("Niveau"),
-            },
-            hide_index=True,
-        )
-
-        if st.button("🗑️ Vider l'historique"):
-            st.session_state.history = []
-            st.rerun()
-
-# ── TAB 3 — Export ────────────────────────────────────────────────────────────
-
-with tab_export:
-    if not st.session_state.results:
-        st.info("Aucun résultat à exporter. Lancez d'abord une analyse.")
-    else:
-        st.markdown("#### Formats d'export disponibles")
-        col_j, col_c = st.columns(2)
-
-        results = st.session_state.results
-
-        with col_j:
-            st.markdown("**JSON complet**")
-            payload = []
-            for r in results:
-                d = asdict(r)
-                payload.append(d)
-            json_str = json.dumps(payload, ensure_ascii=False, indent=2)
-            st.download_button(
-                "📥 Télécharger JSON",
-                data=json_str,
-                file_name=f"thk_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-            st.code(json_str[:600] + "\n...", language="json")
-
-        with col_c:
-            st.markdown("**CSV synthétique**")
-            rows = []
-            for r in results:
-                rows.append({
-                    "target": r.target,
-                    "type": r.target_type,
-                    "risk_score": r.risk_score,
-                    "risk_level": r.risk_level,
-                    "vt_malicious": r.services.get("virustotal", {}).get("malicious", "N/A"),
-                    "vt_total": r.services.get("virustotal", {}).get("total", "N/A"),
-                    "abuseipdb_confidence": r.services.get("abuseipdb", {}).get("abuse_confidence", "N/A"),
-                    "abuseipdb_reports": r.services.get("abuseipdb", {}).get("total_reports", "N/A"),
-                    "alienvault_pulses": r.services.get("alienvault", {}).get("pulse_count", "N/A"),
-                    "greynoise_class": r.services.get("greynoise", {}).get("classification", "N/A"),
-                    "shodan_vulns": len(r.services.get("shodan", {}).get("vulns", [])),
-                    "factors": " | ".join(r.factors),
-                    "timestamp": r.timestamp,
-                })
-            df = pd.DataFrame(rows)
-            csv_str = df.to_csv(index=False)
-            st.download_button(
-                "📥 Télécharger CSV",
-                data=csv_str,
-                file_name=f"thk_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-
-
-# ── Page config ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. PAGE CONFIG — DOIT ÊTRE LE PREMIER APPEL STREAMLIT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
     page_title="THK — Threat Intel Hub",
@@ -432,7 +25,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. CUSTOM CSS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
 <style>
@@ -667,7 +263,10 @@ html, body, [class*="css"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. CONSTANTS ET CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 SERVICE_ICONS = {
     "virustotal":     ("🦠", "VirusTotal"),
@@ -688,8 +287,275 @@ RISK_COLORS = {
     "FAIBLE":   "#22c55e",
 }
 
+HISTORY_FILE = "/mnt/agents/output/thk_history.json"
 
-# ── Sidebar — API Keys ────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. FONCTIONS UTILITAIRES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_api_keys() -> dict:
+    """Charge les clés API depuis Streamlit Secrets."""
+    keys = {}
+    mapping = {
+        "virustotal":     "VIRUSTOTAL_API_KEY",
+        "abuseipdb":      "ABUSEIPDB_API_KEY",
+        "shodan":         "SHODAN_API_KEY",
+        "greynoise":      "GREYNOISE_API_KEY",
+        "alienvault":     "ALIENVAULT_API_KEY",
+        "censys":         "CENSYS_API_KEY",
+        "securitytrails": "SECURITYTRAILS_KEY",
+        "leakix":         "LEAKIX_API_KEY",
+        "hetrixtools":    "HETRIXTOOLS_API_KEY",
+    }
+    for service, secret_name in mapping.items():
+        try:
+            keys[service] = st.secrets[secret_name]
+        except KeyError:
+            keys[service] = ""
+    return keys
+
+
+def _save_history_to_disk(history_list):
+    """Sauvegarde l'historique sur disque pour persistance entre sessions."""
+    try:
+        serializable = []
+        for item in history_list:
+            d = asdict(item)
+            serializable.append(d)
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.toast(f"⚠️ Impossible de sauvegarder l'historique: {e}", icon="⚠️")
+
+
+def _load_history_from_disk():
+    """Charge l'historique depuis le disque."""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Reconstruire les objets AnalysisResult si possible, sinon retourner les dicts
+        return data
+    except Exception:
+        return []
+
+
+def _render_service_card_native(svc_key, icon, svc_name, svc, status, target_type):
+    """
+    CORRECTION: Rendu natif Streamlit au lieu de HTML brut.
+    Utilise les composants Streamlit natifs pour éviter les problèmes
+    de rendu HTML dans les colonnes.
+    """
+    status_labels = {
+        "success": ("● OK", "#22c55e"),
+        "error":   ("● Erreur", "#ef4444"),
+        "timeout": ("● Timeout", "#f97316"),
+        "no_key":  ("● Pas de clé", "#64748b"),
+    }
+    status_label, status_color = status_labels.get(status, ("● —", "#64748b"))
+
+    with st.container(border=True):
+        # Titre du service
+        cols_title = st.columns([0.1, 0.7, 0.2])
+        with cols_title[0]:
+            st.markdown(f"<span style='font-size:1.2rem'>{icon}</span>", unsafe_allow_html=True)
+        with cols_title[1]:
+            st.markdown(f"**{svc_name}**")
+        with cols_title[2]:
+            st.markdown(f"<span style='color:{status_color};font-size:0.7rem'>{status_label}</span>", unsafe_allow_html=True)
+
+        if status == "success":
+            if svc_key == "virustotal":
+                mal = svc.get("malicious", 0)
+                susp = svc.get("suspicious", 0)
+                harm = svc.get("harmless", 0)
+                und = svc.get("undetected", 0)
+                total = svc.get("total", 1) or 1
+                pct = lambda n: round(n / total * 100)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric("Malveillant", mal, delta=None)
+                    st.metric("Suspect", susp, delta=None)
+                with c2:
+                    st.metric("Total moteurs", total, delta=None)
+                    st.metric("Réputation", svc.get("reputation", "N/A"), delta=None)
+
+                # Barre de progression VT
+                st.progress(mal / total, text=f"{mal} malveillant(s) sur {total}")
+
+            elif svc_key == "abuseipdb":
+                conf = svc.get("abuse_confidence", 0)
+                reports = svc.get("total_reports", 0)
+                col = "#ef4444" if conf > 50 else "#f97316" if conf > 20 else "#22c55e"
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Confiance abus:** <span style='color:{col};font-weight:700'>{conf}%</span>", unsafe_allow_html=True)
+                    st.markdown(f"**Signalements:** {reports}")
+                with c2:
+                    st.markdown(f"**Pays:** {svc.get('country','N/A')}")
+                    st.markdown(f"**ISP:** {str(svc.get('isp','N/A'))[:28]}")
+
+            elif svc_key == "greynoise":
+                noise = svc.get("noise", False)
+                riot = svc.get("riot", False)
+                clf = svc.get("classification", "N/A")
+                clf_col = "#ef4444" if clf == "malicious" else "#22c55e" if clf == "benign" else "#64748b"
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Classification:** <span style='color:{clf_col}'>{clf}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**Noise:** {'Oui' if noise else 'Non'}")
+                with c2:
+                    st.markdown(f"**RIOT:** {'Oui' if riot else 'Non'}")
+                    st.markdown(f"**Nom:** {str(svc.get('name','N/A'))[:24]}")
+
+            elif svc_key == "shodan":
+                ports = svc.get("ports", [])
+                vulns = svc.get("vulns", [])
+                tags = svc.get("tags", [])
+                subs = svc.get("subdomains", [])
+
+                if target_type == "ip":
+                    ports_str = ", ".join(str(p) for p in ports[:6]) or "Aucun"
+                    st.markdown(f"**Ports ouverts:** `{ports_str}`")
+                    st.markdown(f"**CVE détectés:** <span style='color:{"#ef4444" if vulns else "#22c55e"}'>{len(vulns)}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**OS:** {svc.get('os','N/A') or 'N/A'}")
+                    if vulns:
+                        st.markdown("".join(f'<span class="tag-pill tag-orange">{v}</span>' for v in vulns[:4]), unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**Sous-domaines:** {len(subs)}")
+
+            elif svc_key == "alienvault":
+                pulses = svc.get("pulse_count", 0)
+                tags = svc.get("tags", [])
+                col = "#ef4444" if pulses > 20 else "#f97316" if pulses > 5 else "#22c55e"
+                st.markdown(f"**Pulses OTX:** <span style='color:{col};font-weight:700'>{pulses}</span>", unsafe_allow_html=True)
+                if tags:
+                    st.markdown("".join(f'<span class="tag-pill">{t[:20]}</span>' for t in tags[:5]), unsafe_allow_html=True)
+
+            elif svc_key == "censys":
+                services = svc.get("services", [])
+                svcs_str = ", ".join(f"{s.get('port')}/{s.get('name','?')}" for s in services[:4]) or "N/A"
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Services exposés:** {len(services)}")
+                    st.markdown(f"**OS:** {svc.get('os','N/A')}")
+                with c2:
+                    st.markdown(f"**Détail:** `{svcs_str}`")
+                    st.markdown(f"**Pays:** {svc.get('country','N/A')}")
+
+            elif svc_key == "securitytrails":
+                if target_type == "domain":
+                    a_recs = ", ".join(svc.get("a_records", [])[:3]) or "N/A"
+                    st.markdown(f"**Sous-domaines:** {svc.get('subdomains',0)}")
+                    st.markdown(f"**Enregistrements A:** `{a_recs}`")
+                else:
+                    st.markdown(f"**Domaines hébergés:** {svc.get('domains_hosted',0)}")
+
+            elif svc_key == "leakix":
+                leaks = svc.get("leaks", 0)
+                leak_col = "#ef4444" if leaks > 0 else "#22c55e"
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Services trouvés:** {svc.get('services_found',0)}")
+                with c2:
+                    st.markdown(f"**Fuites détectées:** <span style='color:{leak_col};font-weight:700'>{leaks}</span>", unsafe_allow_html=True)
+
+            elif svc_key == "hetrixtools":
+                if target_type == "ip":
+                    bl = svc.get("blacklisted_count", 0)
+                    total = svc.get("total_checked", 0)
+                    bl_col = "#ef4444" if bl > 5 else "#f97316" if bl > 0 else "#22c55e"
+                    st.markdown(f"**Blacklisté sur:** <span style='color:{bl_col};font-weight:700'>{bl} / {total} RBLs</span>", unsafe_allow_html=True)
+                    bls = svc.get("blacklists", [])
+                    if bls:
+                        st.markdown("".join(f'<span class="tag-pill tag-red">{b[:20]}</span>' for b in bls[:4]), unsafe_allow_html=True)
+                else:
+                    spf = svc.get("spf", "N/A")
+                    dmarc = svc.get("dmarc", "N/A")
+                    bl_count = svc.get("blacklist_count", 0)
+                    st.markdown(f"**Blacklists:** {bl_count}")
+                    st.markdown(f"**SPF:** `{str(spf)[:30]}`")
+                    st.markdown(f"**DMARC:** `{str(dmarc)[:30]}`")
+        else:
+            reason = svc.get("reason") or svc.get("code") or "Service non disponible"
+            st.info(reason)
+
+
+def _render_result_card(result: AnalysisResult):
+    """CORRECTION: Rendu natif Streamlit pour la carte de résultat principale."""
+    level = result.risk_level
+    score = result.risk_score
+    color = RISK_COLORS.get(level, "#64748b")
+    type_class = "type-ip" if result.target_type == "ip" else "type-domain"
+    type_label = "IPv4" if result.target_type == "ip" else "Domaine"
+
+    with st.container(border=True):
+        # Header de la carte
+        cols = st.columns([3, 1])
+        with cols[0]:
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+                <span style="font-size:1.4rem;font-weight:700;color:#e2e8f0;font-family:'JetBrains Mono',monospace">{result.target}</span>
+                <span class="target-type-badge {type_class}">{type_label}</span>
+            </div>
+            <div style="color:#64748b;font-size:0.85rem">{result.summary}</div>
+            """, unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:1rem">
+                <div class="score-circle score-{level}" style="margin-left:auto">
+                    <div style="font-size:1.3rem">{score}</div>
+                    <div style="font-size:0.55rem;opacity:0.7">/100</div>
+                </div>
+                <span class="risk-badge risk-{level}">{level}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Service detail columns — CORRECTION: utilisation de st.columns avec rendu natif
+        svc_cols = st.columns(3)
+        col_idx = 0
+
+        for svc_key, (icon, svc_name) in SERVICE_ICONS.items():
+            svc = result.services.get(svc_key, {})
+            status = svc.get("status", "unknown")
+
+            if status == "skipped":
+                continue
+
+            with svc_cols[col_idx % 3]:
+                _render_service_card_native(svc_key, icon, svc_name, svc, status, result.target_type)
+
+            col_idx += 1
+
+        # Factors
+        if result.factors:
+            with st.expander("🔎 Facteurs de risque détaillés"):
+                for f in result.factors:
+                    st.markdown(f"- {f}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. INITIALISATION DU SESSION STATE (AVEC PERSISTANCE DISQUE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "history" not in st.session_state:
+    # CORRECTION: Charger l'historique depuis le disque au démarrage
+    disk_history = _load_history_from_disk()
+    st.session_state.history = disk_history
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. SIDEBAR
+# ═══════════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
     st.markdown("## 🛡️ THK")
@@ -698,10 +564,8 @@ with st.sidebar:
     st.markdown("### 🔑 Clés API")
     st.markdown("<p style='color:#64748b;font-size:0.8rem'>Renseignez les clés des services que vous souhaitez interroger. Les non renseignées seront ignorées.</p>", unsafe_allow_html=True)
 
-    #api_keys = {}
     api_keys = load_api_keys()
 
-    #configured = sum(1 for v in api_keys.values() if v.strip())
     configured = sum(1 for v in api_keys.values() if v.strip())
     color = "#22c55e" if configured > 4 else "#eab308" if configured > 1 else "#ef4444"
     st.markdown(f"""
@@ -721,7 +585,10 @@ with st.sidebar:
     </p>
     """, unsafe_allow_html=True)
 
-# ── Main area ─────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. HEADER PRINCIPAL
+# ═══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
 <div class="app-header">
@@ -730,6 +597,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. TABS — DÉCLARATION ET REMPLISSAGE DANS L'ORDRE LOGIQUE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tab_analyze, tab_history, tab_export = st.tabs(["🔍 Analyse", "📜 Historique", "📤 Export"])
 
 
 # ── TAB 1 — Analyse ───────────────────────────────────────────────────────────
@@ -780,6 +653,8 @@ with tab_analyze:
                     results = run_analysis(targets, clean_keys)
                     st.session_state.results = results
                     st.session_state.history.extend(results)
+                    # CORRECTION: Sauvegarder l'historique sur disque
+                    _save_history_to_disk(st.session_state.history)
                     st.success(f"✅ Analyse terminée — {len(results)} cible(s) traitée(s)")
                 except Exception as e:
                     st.error(f"❌ Erreur lors de l'analyse : {e}")
@@ -823,3 +698,141 @@ with tab_analyze:
         for result in results:
             _render_result_card(result)
 
+
+# ── TAB 2 — History ───────────────────────────────────────────────────────────
+
+with tab_history:
+    # CORRECTION: Afficher TOUS les résultats de l'historique, pas seulement la session actuelle
+    all_history = st.session_state.history
+
+    if not all_history:
+        st.info("Aucune analyse dans l'historique. Lancez une analyse dans l'onglet **Analyse**.")
+    else:
+        rows = []
+        for r in all_history:
+            # Gérer à la fois les objets AnalysisResult et les dicts JSON
+            if isinstance(r, dict):
+                rows.append({
+                    "Cible": r.get("target", "N/A"),
+                    "Type": r.get("target_type", "N/A").upper(),
+                    "Score": r.get("risk_score", 0),
+                    "Niveau": r.get("risk_level", "N/A"),
+                    "Résumé": r.get("summary", ""),
+                    "Date": r.get("timestamp", "")[:19].replace("T", " "),
+                })
+            else:
+                rows.append({
+                    "Cible": r.target,
+                    "Type": r.target_type.upper(),
+                    "Score": r.risk_score,
+                    "Niveau": r.risk_level,
+                    "Résumé": r.summary,
+                    "Date": r.timestamp[:19].replace("T", " "),
+                })
+        df = pd.DataFrame(rows)
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            column_config={
+                "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+                "Niveau": st.column_config.TextColumn("Niveau"),
+            },
+            hide_index=True,
+        )
+
+        col_clear_h, col_export_h = st.columns([1, 4])
+        with col_clear_h:
+            if st.button("🗑️ Vider l'historique", key="clear_history_btn"):
+                st.session_state.history = []
+                if os.path.exists(HISTORY_FILE):
+                    os.remove(HISTORY_FILE)
+                st.rerun()
+        with col_export_h:
+            # CORRECTION: Bouton d'export direct depuis l'historique
+            if all_history:
+                hist_rows = []
+                for r in all_history:
+                    if isinstance(r, dict):
+                        hist_rows.append(r)
+                    else:
+                        hist_rows.append(asdict(r))
+                hist_json = json.dumps(hist_rows, ensure_ascii=False, indent=2)
+                st.download_button(
+                    "📥 Exporter l'historique JSON",
+                    data=hist_json,
+                    file_name=f"thk_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                )
+
+
+# ── TAB 3 — Export ────────────────────────────────────────────────────────────
+
+with tab_export:
+    # CORRECTION: L'export doit proposer les résultats de la session ET l'historique complet
+    export_source = st.radio(
+        "Source des données à exporter:",
+        ["Résultats de la session actuelle", "Historique complet (toutes les sessions)"],
+        horizontal=True,
+    )
+
+    if export_source == "Résultats de la session actuelle":
+        source_data = st.session_state.results
+    else:
+        source_data = st.session_state.history
+
+    if not source_data:
+        st.info("Aucun résultat à exporter. Lancez d'abord une analyse.")
+    else:
+        st.markdown("#### Formats d'export disponibles")
+        col_j, col_c = st.columns(2)
+
+        # Normaliser les données (objets ou dicts)
+        normalized = []
+        for r in source_data:
+            if isinstance(r, dict):
+                normalized.append(r)
+            else:
+                normalized.append(asdict(r))
+
+        with col_j:
+            st.markdown("**JSON complet**")
+            json_str = json.dumps(normalized, ensure_ascii=False, indent=2)
+            st.download_button(
+                "📥 Télécharger JSON",
+                data=json_str,
+                file_name=f"thk_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+            st.code(json_str[:600] + "\n...", language="json")
+
+        with col_c:
+            st.markdown("**CSV synthétique**")
+            rows = []
+            for r in normalized:
+                rows.append({
+                    "target": r.get("target", "N/A"),
+                    "type": r.get("target_type", "N/A"),
+                    "risk_score": r.get("risk_score", 0),
+                    "risk_level": r.get("risk_level", "N/A"),
+                    "vt_malicious": r.get("services", {}).get("virustotal", {}).get("malicious", "N/A"),
+                    "vt_total": r.get("services", {}).get("virustotal", {}).get("total", "N/A"),
+                    "abuseipdb_confidence": r.get("services", {}).get("abuseipdb", {}).get("abuse_confidence", "N/A"),
+                    "abuseipdb_reports": r.get("services", {}).get("abuseipdb", {}).get("total_reports", "N/A"),
+                    "alienvault_pulses": r.get("services", {}).get("alienvault", {}).get("pulse_count", "N/A"),
+                    "greynoise_class": r.get("services", {}).get("greynoise", {}).get("classification", "N/A"),
+                    "shodan_vulns": len(r.get("services", {}).get("shodan", {}).get("vulns", [])),
+                    "factors": " | ".join(r.get("factors", [])),
+                    "timestamp": r.get("timestamp", ""),
+                })
+            df = pd.DataFrame(rows)
+            csv_str = df.to_csv(index=False)
+            st.download_button(
+                "📥 Télécharger CSV",
+                data=csv_str,
+                file_name=f"thk_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
