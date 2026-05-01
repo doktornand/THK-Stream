@@ -35,6 +35,13 @@ def load_api_keys() -> dict:
 tab_analyze, tab_history, tab_export = st.tabs(["🔍 Analyse", "📜 Historique", "📤 Export"])
 
 
+# ── Session state ─────────────────────────────────────────────────────────────
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 def _render_result_card(result: AnalysisResult):
     level = result.risk_level
     score = result.risk_score
@@ -681,12 +688,6 @@ RISK_COLORS = {
     "FAIBLE":   "#22c55e",
 }
 
-# ── Session state ─────────────────────────────────────────────────────────────
-
-if "results" not in st.session_state:
-    st.session_state.results = []
-if "history" not in st.session_state:
-    st.session_state.history = []
 
 # ── Sidebar — API Keys ────────────────────────────────────────────────────────
 
