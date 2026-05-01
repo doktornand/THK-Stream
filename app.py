@@ -32,6 +32,9 @@ def load_api_keys() -> dict:
             keys[service] = ""
     return keys
 
+tab_analyze, tab_history, tab_export = st.tabs(["🔍 Analyse", "📜 Historique", "📤 Export"])
+
+
 def _render_result_card(result: AnalysisResult):
     level = result.risk_level
     score = result.risk_score
@@ -726,7 +729,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_analyze, tab_history, tab_export = st.tabs(["🔍 Analyse", "📜 Historique", "📤 Export"])
+
 
 # ── TAB 1 — Analyse ───────────────────────────────────────────────────────────
 
