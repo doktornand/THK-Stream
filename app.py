@@ -32,6 +32,58 @@ def load_api_keys() -> dict:
             keys[service] = ""
     return keys
 
+def _render_result_card(result: AnalysisResult):
+    level = result.risk_level
+    score = result.risk_score
+    color = RISK_COLORS.get(level, "#64748b")
+    type_class = "type-ip" if result.target_type == "ip" else "type-domain"
+    type_label = "IPv4" if result.target_type == "ip" else "Domaine"
+
+    with st.container():
+        st.markdown(f"""
+        <div class="target-card">
+            <div class="target-header">
+                <div style="display:flex;align-items:center;gap:0.75rem">
+                    <div class="target-name">{result.target}</div>
+                    <span class="target-type-badge {type_class}">{type_label}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:1rem">
+                    <div class="score-circle score-{level}">
+                        <div style="font-size:1.3rem">{score}</div>
+                        <div style="font-size:0.55rem;opacity:0.7">/100</div>
+                    </div>
+                    <span class="risk-badge risk-{level}">{level}</span>
+                </div>
+            </div>
+            <div style="color:#64748b;font-size:0.85rem;margin-bottom:0.5rem">{result.summary}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Service detail columns
+        svc_cols = st.columns(3)
+        col_idx = 0
+
+        for svc_key, (icon, svc_name) in SERVICE_ICONS.items():
+            svc = result.services.get(svc_key, {})
+            status = svc.get("status", "unknown")
+
+            if status == "skipped":
+                continue
+
+            with svc_cols[col_idx % 3]:
+                _render_service_card(svc_key, icon, svc_name, svc, status, result.target_type)
+
+            col_idx += 1
+
+        # Factors
+        if result.factors:
+            with st.expander("🔎 Facteurs de risque détaillés"):
+                for f in result.factors:
+                    st.markdown(f"- {f}")
+
+        st.markdown("---")
+
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -439,56 +491,6 @@ with tab_analyze:
             _render_result_card(result)
 
 
-def _render_result_card(result: AnalysisResult):
-    level = result.risk_level
-    score = result.risk_score
-    color = RISK_COLORS.get(level, "#64748b")
-    type_class = "type-ip" if result.target_type == "ip" else "type-domain"
-    type_label = "IPv4" if result.target_type == "ip" else "Domaine"
-
-    with st.container():
-        st.markdown(f"""
-        <div class="target-card">
-            <div class="target-header">
-                <div style="display:flex;align-items:center;gap:0.75rem">
-                    <div class="target-name">{result.target}</div>
-                    <span class="target-type-badge {type_class}">{type_label}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:1rem">
-                    <div class="score-circle score-{level}">
-                        <div style="font-size:1.3rem">{score}</div>
-                        <div style="font-size:0.55rem;opacity:0.7">/100</div>
-                    </div>
-                    <span class="risk-badge risk-{level}">{level}</span>
-                </div>
-            </div>
-            <div style="color:#64748b;font-size:0.85rem;margin-bottom:0.5rem">{result.summary}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Service detail columns
-        svc_cols = st.columns(3)
-        col_idx = 0
-
-        for svc_key, (icon, svc_name) in SERVICE_ICONS.items():
-            svc = result.services.get(svc_key, {})
-            status = svc.get("status", "unknown")
-
-            if status == "skipped":
-                continue
-
-            with svc_cols[col_idx % 3]:
-                _render_service_card(svc_key, icon, svc_name, svc, status, result.target_type)
-
-            col_idx += 1
-
-        # Factors
-        if result.factors:
-            with st.expander("🔎 Facteurs de risque détaillés"):
-                for f in result.factors:
-                    st.markdown(f"- {f}")
-
-        st.markdown("---")
 
 
 def _render_service_card(svc_key, icon, svc_name, svc, status, target_type):
